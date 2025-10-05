@@ -1,221 +1,237 @@
-# app_streamlit.py
-import streamlit as st
-import pandas as pd
-import requests
-import altair as alt
-import io
+# ml/app_streamlit.py
+from __future__ import annotations
+import json, io
+from pathlib import Path
 import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
+import pandas as pd
+import matplotlib.pyplot as plt
+import streamlit as st
+from joblib import load
 
-API = "http://localhost:8000"
+from mapping import RAW8, toi_to_koi_raw, add_model_features, LABEL_CANDS, normalize_labels
 
-st.set_page_config(page_title="Exoplanet Classifier (Demo)", layout="wide")
-st.title("Exoplanet Classifier (Demo)")
-st.write(
-    "Введіть параметри транзиту та зорі або завантажте CSV з кількома об'єктами. "
-    "Отримаєте прогноз класу (CONFIRMED / CANDIDATE / FALSE POSITIVE) та імовірності."
-)
-st.caption("Примітка: Це демо працює на тестовому сервісі. Точність відрізнятиметься від фінальної моделі.")
+st.set_page_config(page_title="Exoplanet Classifier (KOI→TESS)", layout="wide")
 
-tab1, tab2 = st.tabs(["Інтерактивний прогноз", "Аналіз TESS (CSV)"])
+# ---------------------------
+# Helpers
+# ---------------------------
+def log(msg: str):
+    st.session_state.setdefault("log", [])
+    st.session_state["log"].append(msg)
 
-FIELDS = [
-    ("koi_period", "koi_period [days]", "Orbital period in days", 10.0, 0.2, 1000.0),
-    ("koi_duration", "koi_duration [hours]", "Transit duration in hours", 3.0, 0.1, 30.0),
-    ("koi_depth", "koi_depth [ppm]", "Transit depth in ppm", 800.0, 1.0, 200000.0),
-    ("koi_prad", "koi_prad [R_earth]", "Planet radius in Earth radii", 2.5, 0.5, 30.0),
-    ("koi_steff", "koi_steff [K]", "Stellar effective temperature", 5800.0, 2500.0, 10000.0),
-    ("koi_slogg", "koi_slogg [log10(cm/s^2)]", "Stellar surface gravity", 4.4, 2.0, 5.5),
-    ("koi_srad", "koi_srad [R_sun]", "Stellar radius in Solar radii", 1.0, 0.1, 50.0),
-    ("koi_kepmag", "koi_kepmag [mag]", "Kepler/TESS magnitude", 15.5, 5.0, 18.0),
-]
+def load_artifacts(art_dir: Path):
+    model = load(art_dir / "model.joblib")
+    label_enc = load(art_dir / "label_encoder.joblib")
+    features = json.loads((art_dir / "features.json").read_text())
+    metrics = json.loads((art_dir / "metrics.json").read_text())
+    return model, label_enc, features, metrics
 
-# -----------------------
-# Tab 1 — single prediction
-# -----------------------
+def prepare_X_from_raw(raw_df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
+    df = add_model_features(raw_df)
+    X = df.reindex(columns=features)
+    # заповнюємо NaN нулями (бо є флаги *_missing)
+    for c in X.columns:
+        if X[c].isna().any():
+            X[c] = X[c].fillna(0.0)
+    return X, df
+
+def figure_to_bytes(fig) -> bytes:
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+def bar_probs(classes: list[str], probs: np.ndarray, title: str):
+    fig = plt.figure(figsize=(4.5,3.2))
+    plt.bar(classes, probs)
+    plt.ylim(0,1)
+    plt.ylabel("Probability")
+    plt.title(title)
+    return fig
+
+def hist_max_proba(maxp: np.ndarray, title="Histogram of Max Probability"):
+    fig = plt.figure(figsize=(6,3.2))
+    plt.hist(maxp, bins=25)
+    plt.xlabel("Max class probability")
+    plt.ylabel("Count")
+    plt.title(title)
+    return fig
+
+def confusion_if_labels(y_true: pd.Series, y_pred: np.ndarray, ordered):
+    from sklearn.metrics import confusion_matrix, classification_report
+    M = confusion_matrix(y_true, y_pred, labels=ordered)
+    fig = plt.figure(figsize=(5,4))
+    plt.imshow(M, cmap="Blues")
+    plt.xticks(range(len(ordered)), ordered, rotation=45, ha="right")
+    plt.yticks(range(len(ordered)), ordered)
+    for i in range(M.shape[0]):
+        for j in range(M.shape[1]):
+            plt.text(j, i, str(M[i,j]), ha="center", va="center", color="black")
+    plt.title("Confusion Matrix on provided labels")
+    plt.colorbar(fraction=0.046, pad=0.04)
+    return fig, classification_report(y_true, y_pred, labels=ordered, output_dict=True)
+
+# ---------------------------
+# Sidebar (artifacts & options)
+# ---------------------------
+base_dir = Path(__file__).resolve().parents[1]
+st.sidebar.subheader("Artifacts")
+art_dir = Path(st.sidebar.text_input("Path to artifacts", str(base_dir / "artifacts")))
+threshold = st.sidebar.slider("High-confidence threshold", 0.5, 0.99, 0.80, 0.01)
+
+# Load artifacts
+try:
+    model, label_enc, FEATURES, METR = load_artifacts(art_dir)
+    st.sidebar.success("Artifacts loaded")
+except Exception as e:
+    st.sidebar.error(f"Failed to load artifacts: {e}")
+    st.stop()
+
+CLASSES = list(label_enc.classes_)
+
+# ---------------------------
+# Tabs
+# ---------------------------
+tab1, tab2 = st.tabs(["Single Object (8 features)", "Batch CSV (TOI/TESS)"])
+
+# ===========================
+# Tab 1 — Single
+# ===========================
 with tab1:
-    st.subheader("Інтерактивний прогноз (один об'єкт)")
-    st.caption("Введіть 8 параметрів — натисніть 'Прогноз', щоб отримати ймовірності для трьох класів.")
+    st.header("Interactive prediction for a single object")
     cols = st.columns(4)
     vals = {}
-    for i, (key, label, hint, default, mn, mx) in enumerate(FIELDS):
+    nice = {
+        "koi_period":   "Orbital period (days)",
+        "koi_duration": "Transit duration (hours)",
+        "koi_depth":    "Transit depth (ppm)",
+        "koi_prad":     "Planet radius (R_Earth)",
+        "koi_steff":    "Star Teff (K)",
+        "koi_slogg":    "Star logg",
+        "koi_srad":     "Star radius (R_Sun)",
+        "koi_kepmag":   "TESS/Kep magnitude",
+    }
+    for i, k in enumerate(RAW8):
         with cols[i % 4]:
-            vals[key] = st.number_input(label, value=float(default), min_value=float(mn), max_value=float(mx), help=hint, format="%.4f")
+            vals[k] = st.number_input(nice[k], value=float("nan"))
 
-    if st.button("Прогноз"):
-        try:
-            with st.spinner("Отримую прогноз..."):
-                r = requests.post(f"{API}/predict_one", json=vals, timeout=10)
-                if r.status_code != 200:
-                    st.error(f"Помилка сервісу: {r.status_code} {r.text}")
-                else:
-                    data = r.json()
-                    st.metric("Клас", data.get("pred_class", "-"))
-                    probs = data.get("probs", {})
-                    df = pd.DataFrame({"class": list(probs.keys()), "prob": [float(v) for v in probs.values()]})
-                    df = df.sort_values("prob", ascending=False).reset_index(drop=True)
-                    df["prob_pct"] = (df["prob"] * 100).round(2)
+    if st.button("Predict", type="primary"):
+        log("[single] Building raw dataframe…")
+        raw_df = pd.DataFrame([{k: (None if np.isnan(v) else v) for k, v in vals.items()}])
 
-                    chart = alt.Chart(df).mark_bar().encode(
-                        x=alt.X("class:N", sort=None, title=None),
-                        y=alt.Y("prob:Q", title="Probability"),
-                        tooltip=[alt.Tooltip("prob_pct:Q", title="Probability (%)")]
-                    )
-                    st.altair_chart(chart.properties(height=300), use_container_width=True)
+        # Build model features
+        X, full_df = prepare_X_from_raw(raw_df, FEATURES)
+        log("[single] Features prepared")
 
-                    st.write("Точні значення (3 знаки):")
-                    st.table(df.assign(prob=lambda d: d["prob"].round(3)).rename(columns={"prob": "probability"}))
-        except requests.exceptions.RequestException as e:
-            st.error("Сервіс тимчасово недоступний або таймаут. Перевірте URL у змінних оточення (API_URL).")
+        # Predict
+        proba = model.predict_proba(X.values)[0]
+        pred_idx = int(np.argmax(proba))
+        pred_cls = label_enc.inverse_transform([pred_idx])[0]
+        st.subheader(f"Predicted class: **{pred_cls}**")
 
-# -----------------------
-# Tab 2 — batch + візуалізації
-# -----------------------
+        # Probabilities table + bar
+        st.write(pd.DataFrame({"class": CLASSES, "probability": proba}))
+        st.image(figure_to_bytes(bar_probs(CLASSES, proba, "Class probabilities")))
+
+        # Details: transformed features
+        with st.expander("Show transformed features (what went into the model)"):
+            st.dataframe(full_df.reindex(columns=FEATURES))
+
+        # Model metrics (from training)
+        st.markdown("### Model metrics (from training)")
+        colm = st.columns(3)
+        with colm[0]:
+            st.metric("ROC-AUC (OVR)", f"{METR.get('roc_auc_ovr', None)}")
+        with colm[1]:
+            st.write("Classes:", METR.get("classes", []))
+        with colm[2]:
+            st.write("Label column:", METR.get("label_col", "—"))
+        st.write("Classification report (train holdout):")
+        st.json(METR.get("classification_report", {}))
+
+        # High-confidence flag
+        st.info(f"High-confidence (>{threshold:.2f})? → **{proba[pred_idx] >= threshold}** (p={proba[pred_idx]:.3f})", icon="✅")
+
+        # Log
+        with st.expander("Logs"):
+            st.code("\n".join(st.session_state.get("log", [])) or "<no logs>")
+
+# ===========================
+# Tab 2 — Batch
+# ===========================
 with tab2:
-    st.subheader("Аналіз TESS (батч)")
-    st.caption("Завантажте CSV з мінімальними колонками: koi_period,koi_duration,koi_depth,koi_prad,koi_steff,koi_slogg,koi_srad,koi_kepmag")
-    uploaded = st.file_uploader("CSV", type=["csv"])
+    st.header("Batch predictions for TOI/TESS CSV")
+    f = st.file_uploader("Upload TOI/TESS CSV (NASA archive export is OK)", type=["csv","txt"])
+    if f is not None:
+        try:
+            log("[batch] Reading CSV (skipping commented lines)…")
+            df_in = pd.read_csv(f, comment="#", engine="python")
+            st.write("Detected columns:", list(df_in.columns)[:40])
 
-    if uploaded is not None:
-       try:
-          file_bytes = uploaded.getvalue()
-          df_in = pd.read_csv(io.BytesIO(file_bytes))
-       except Exception as e:
-          st.error(f"Не вдалося прочитати CSV: {e}")
-          st.stop()
+            log("[batch] Mapping to RAW8…")
+            raw_df = toi_to_koi_raw(df_in)
 
-       expected = ["koi_period","koi_duration","koi_depth","koi_prad","koi_steff","koi_slogg","koi_srad","koi_kepmag"]
-       missing = [c for c in expected if c not in df_in.columns]
-       if missing:
-          st.warning(f"Відсутні колонки: {', '.join(missing)}")
-       else:
-          try:
-              files = {"file": (uploaded.name, io.BytesIO(file_bytes), "text/csv")}
-              resp = requests.post(f"{API}/predict_batch", files=files, timeout=60)
+            log("[batch] Building model features…")
+            X, feat_df = prepare_X_from_raw(raw_df, FEATURES)
 
-              if resp.status_code != 200:
-                  st.error(f"Помилка сервісу: {resp.status_code} {resp.text}")
-              else:
-                  preds_csv = resp.content.decode("utf-8")
-                  out_df = pd.read_csv(io.StringIO(preds_csv))
+            log("[batch] Running inference…")
+            P = model.predict_proba(X.values)
+            pred_idx = np.argmax(P, axis=1)
+            pred_cls = label_enc.inverse_transform(pred_idx)
+            maxp = P[np.arange(len(pred_idx)), pred_idx]
 
-                  st.write(f"Отримано {len(out_df)} рядків")
-                  st.dataframe(out_df.head(50))
+            out = df_in.copy()
+            out["pred_class"] = pred_cls
+            out["pred_prob"]  = maxp
 
-                  # --- Distribution bar chart (existing) ---
-                  dist = out_df["pred_class"].value_counts().reset_index()
-                  dist.columns = ["class", "count"]
-                  chart = alt.Chart(dist).mark_bar().encode(
-                      x="class", y="count", tooltip=["count"]
-                  )
-                  st.altair_chart(chart.properties(height=250), use_container_width=True)
+            # показати кілька рядків
+            st.success(f"Predictions computed for {len(out)} rows")
+            st.dataframe(out.head(30))
 
-                  st.download_button("Експорт в CSV", preds_csv, file_name="preds.csv")
+            # скачування
+            st.download_button(
+                "Download predictions CSV",
+                out.to_csv(index=False).encode("utf-8"),
+                file_name="predictions.csv",
+                mime="text/csv",
+            )
 
-                  # --- New visualizations block ---
-                  st.markdown("---")
-                  st.subheader("Візуалізації — P vs R, Correlation Heatmap, Boxplots")
+            # ----- графіки аналізу -----
+            st.subheader("Analysis visuals")
 
-                  # Convert numeric columns safely
-                  numeric_cols = ["koi_period","koi_prad","koi_steff","koi_srad","koi_kepmag","koi_depth"]
-                  for c in numeric_cols:
-                      if c in out_df.columns:
-                          out_df[c] = pd.to_numeric(out_df[c], errors="coerce")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.image(figure_to_bytes(hist_max_proba(maxp)))
+            with c2:
+                # частка високої впевненості по передбачених класах
+                prop = (
+                    pd.Series(pred_cls)
+                      .groupby(pred_cls)
+                      .apply(lambda idx: float(np.mean(maxp[pred_cls==idx.name] >= threshold)))
+                      .reindex(CLASSES)
+                      .fillna(0.0)
+                )
+                fig = plt.figure(figsize=(6,3.2))
+                plt.bar(prop.index, prop.values)
+                plt.ylim(0,1)
+                plt.title(f"Proportion above {threshold:.2f} by predicted class")
+                st.image(figure_to_bytes(fig))
 
-                  # 1) Scatter: Period vs Radius (log-log) colored by pred_class
-                  if {"koi_period","koi_prad","pred_class"}.issubset(out_df.columns):
-                      scatter_df = out_df.dropna(subset=["koi_period","koi_prad","pred_class"]).copy()
-                      # to avoid issues with zeros or negatives, clip to small positive
-                      scatter_df["koi_period_clipped"] = scatter_df["koi_period"].clip(lower=1e-3)
-                      scatter_df["koi_prad_clipped"] = scatter_df["koi_prad"].clip(lower=1e-3)
-                      fig_scatter = px.scatter(
-                          scatter_df,
-                          x="koi_period_clipped",
-                          y="koi_prad_clipped",
-                          color="pred_class",
-                          hover_data=["kepid"] if "kepid" in scatter_df.columns else None,
-                          labels={"koi_period_clipped": "Period (days)", "koi_prad_clipped": "Radius (R_earth)"},
-                          title="Period vs Radius (кольором — pred_class)",
-                          log_x=True,
-                          log_y=True,
-                          height=520
-                      )
-                      fig_scatter.update_layout(margin=dict(l=60, r=20, t=50, b=60))
-                      st.plotly_chart(fig_scatter, use_container_width=True)
-                  else:
-                      st.info("Щоб побудувати P vs R потрібні колонки: koi_period, koi_prad, pred_class (є в відповіді API).")
+            # якщо у файлі є істинні мітки — покажемо матрицю
+            gt_col = next((c for c in LABEL_CANDS if c in df_in.columns), None)
+            if gt_col:
+                st.subheader("Provided labels found — evaluation on this CSV")
+                y_true = normalize_labels(df_in[gt_col])
+                fig, report = confusion_if_labels(y_true, pred_cls, ordered=CLASSES)
+                st.image(figure_to_bytes(fig))
+                st.json(report)
 
-                  # 2) Correlation heatmap between main numeric params
-                  corr_cols = [c for c in numeric_cols if c in out_df.columns]
-                  if len(corr_cols) >= 2:
-                      corr_df = out_df[corr_cols].dropna()
-                      # If dataset small, warn
-                      if len(corr_df) < 5:
-                          st.warning("Увага: дуже мало рядків для надійної кореляції (менше 5).")
-                      corr_mat = corr_df.corr(method="pearson")
-                      fig_heat = px.imshow(
-                          corr_mat,
-                          text_auto=True,
-                          zmin=-1, zmax=1,
-                          title="Кореляційна матриця (Pearson)",
-                          labels=dict(x="Feature", y="Feature", color="Pearson r"),
-                          height=480
-                      )
-                      fig_heat.update_layout(margin=dict(l=80, r=20, t=50, b=80))
-                      st.plotly_chart(fig_heat, use_container_width=True)
-                  else:
-                      st.info("Не вистачає числових колонок для кореляції.")
+            # логування
+            with st.expander("Logs"):
+                st.code("\n".join(st.session_state.get("log", [])) or "<no logs>")
 
-                  # 3) Boxplots for key params by pred_class
-                  box_features = ["koi_period","koi_prad","koi_steff"]
-                  available_box = [f for f in box_features if f in out_df.columns]
-                  if len(available_box) > 0 and "pred_class" in out_df.columns:
-                      st.markdown("#### Boxplots (PLANET vs NOT-PLANET або інші класи)")
-                      # Create grid of plots
-                      cols_plot = st.columns( max(1, min(3, len(available_box))) )
-                      for i, feat in enumerate(available_box):
-                          with cols_plot[i % len(cols_plot)]:
-                              bx_df = out_df.dropna(subset=[feat, "pred_class"])
-                              if bx_df.empty:
-                                  st.write(f"{feat}: недостатньо даних")
-                                  continue
-                              fig_box = px.box(
-                                  bx_df,
-                                  x="pred_class",
-                                  y=feat,
-                                  points="outliers",
-                                  title=f"Boxplot — {feat} by pred_class",
-                                  labels={feat: feat, "pred_class": "pred_class"},
-                                  height=380
-                              )
-                              # if the feature is heavily skewed, offer log toggle
-                              if (bx_df[feat] > 0).all():
-                                  fig_box.update_yaxes(type="log")
-                                  fig_box.update_layout(title=f"{feat} (log scale) by pred_class")
-                              st.plotly_chart(fig_box, use_container_width=True)
-                  else:
-                      st.info("Для boxplots потрібні колонки: koi_period/koi_prad/koi_steff та pred_class.")
-
-          except requests.exceptions.RequestException:
-              st.error("Сервіс тимчасово недоступний або таймаут при відправці файлу.")
-
-    with st.expander("Очікуваний шаблон CSV"):
-        st.code("koi_period,koi_duration,koi_depth,koi_prad,koi_steff,koi_slogg,koi_srad,koi_kepmag\n2.0,3.1,850,1.9,5750,4.3,0.9,15.0")
-
-# -----------------------
-# Sidebar
-# -----------------------
-st.sidebar.header("Налаштування")
-st.sidebar.text_input("API URL", API, key="api_url")
-st.sidebar.markdown(
-    "**Валідація полів:**\n"
-    "- period: 0.2…1000 діб\n"
-    "- duration: 0.1…30 год\n"
-    "- depth: 1…200000 ppm\n"
-    "- R_p: 0.5…30 R_earth\n"
-    "- Teff: 2500…10000 K\n"
-    "- logg: 2…5.5\n"
-    "- R_star: 0.1…50 R_sun\n"
-    "- Kepmag: 5…18"
-)
+        except Exception as e:
+            st.error(f"Failed: {e}")
+            with st.expander("Logs"):
+                st.code("\n".join(st.session_state.get("log", [])) or "<no logs>")
