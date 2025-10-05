@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
+import streamlit.components.v1 as components
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Make project root importable → we can use `ml.*`
@@ -17,8 +18,9 @@ from ml.mapping import RAW8, add_model_features, toi_to_koi_raw, LABEL_CANDS, no
 from ml.model_utils import load_artifacts, ensure_features
 
 # ──────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Exoplanet Classifier", layout="wide")
-st.title("🔭 Exoplanet Classifier — ML Demo")
+st.set_page_config(page_title="Exoplanet Classifier", layout="wide", initial_sidebar_state="expanded")
+
+st.title("🔭 Exoplanet Classifier")
 
 # Sidebar
 st.sidebar.header("⚙️ Settings")
@@ -27,7 +29,7 @@ default_art = ROOT / "artifacts"
 art_dir_inp = st.sidebar.text_input("Artifacts path", value=str(default_art))
 threshold = st.sidebar.slider("Decision threshold (for positive class)", 0.0, 1.0, 0.5, 0.01)
 
-# Example downloads (to mirror your deployed app UX)
+# Example downloads
 ex_col1, ex_col2 = st.sidebar.columns(2)
 with ex_col1:
     st.download_button(
@@ -35,7 +37,7 @@ with ex_col1:
         data=(ROOT / "data" / "example_batch.csv").read_bytes() if (ROOT / "data" / "example_batch.csv").exists()
              else b"toi,tid,tfopwg_disp,pl_orbper,pl_trandurh,pl_trandep,pl_rade,st_teff,st_logg,st_rad,st_tmag\n",
         file_name="example_batch.csv", mime="text/csv",
-        help="Пример файлу для вкладки Batch"
+        help="Example file for Batch tab"
     )
 with ex_col2:
     st.download_button(
@@ -45,7 +47,7 @@ with ex_col2:
             "koi_steff": 5600, "koi_slogg": 4.4, "koi_srad": 1.0, "koi_kepmag": 11.8
         }, indent=2).encode("utf-8"),
         file_name="example_one.json", mime="application/json",
-        help="Пример JSON для одиночного прогнозу"
+        help="Example JSON for single prediction"
     )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -87,8 +89,28 @@ tab_single, tab_batch = st.tabs(["Single Object", "Batch (CSV)"])
 # =============================================================================
 with tab_single:
     st.subheader("🛰️ Interactive prediction for a single candidate")
-    st.caption("Введи 8 сирих параметрів. Модель побудує фічі, порахує ймовірності та пояснить деталі.")
+    st.caption("Enter 8 raw parameters. The model will build features, calculate probabilities, and explain details.")
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # 1) 3D planet — HTML with Three.js
+    # ──────────────────────────────────────────────────────────────────────────
+    html_file = Path(__file__).parent / "exoplanet_3d.html"
+    if not html_file.exists():
+       st.error(f"File {html_file} not found.")
+    else:
+        with open(html_file, "r", encoding="utf-8") as f:
+            exoplanet_html = f.read()
+
+        planet_iframe = components.html(
+            exoplanet_html,
+            height=600,
+            scrolling=True
+        )
+
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 2) Input parameters (8 fields)
+    # ──────────────────────────────────────────────────────────────────────────
     cols = st.columns(4)
     inputs = {}
     fields = [
@@ -103,52 +125,89 @@ with tab_single:
     ]
     for i, (key, label) in enumerate(fields):
         with cols[i % 4]:
-            val = st.number_input(label, value=float("nan"))
+            val = st.number_input(label, value=float("nan"), key=key)
             inputs[key] = None if np.isnan(val) else float(val)
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # 3) Get values for 3D model
+    # ──────────────────────────────────────────────────────────────────────────
+    koi_prad_val = inputs.get("koi_prad")
+    koi_steff_val = inputs.get("koi_steff")
+    
+    # If values are valid, display them
+    if koi_prad_val is not None and koi_steff_val is not None:
+        st.caption(f"🌍 Planet radius: {koi_prad_val:.2f} R⊕ | ⭐ Stellar temp: {koi_steff_val:.0f} K")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 4) ML model prediction
+    # ──────────────────────────────────────────────────────────────────────────
     if st.button("Predict", use_container_width=True, type="primary", disabled=not artifacts_ok):
         if not artifacts_ok:
             st.error("Artifacts not loaded")
         else:
-            # RAW8 → MODEL features
+            # Validate parameters for 3D
+            planet_radius_safe = koi_prad_val if koi_prad_val is not None else 1.0
+            stellar_teff_safe = koi_steff_val if koi_steff_val is not None else 5500
+            
+            # Update 3D planet model
+            components.html(f"""
+            <script>
+            (function() {{
+                // Find all iframes on the page
+                const iframes = window.parent.document.querySelectorAll('iframe');
+                
+                // Find iframe with 3D model (first large iframe)
+                iframes.forEach(iframe => {{
+                    if (iframe.offsetHeight > 500) {{
+                        iframe.contentWindow.postMessage({{
+                            type: "update_params",
+                            params: {{
+                                planet_radius: {planet_radius_safe},
+                                stellar_teff: {stellar_teff_safe}
+                            }}
+                        }}, "*");
+                        console.log("Message sent to iframe:", {{planet_radius: {planet_radius_safe}, stellar_teff: {stellar_teff_safe}}});
+                    }}
+                }});
+            }})();
+            </script>
+            """, height=0)
+            
+            # ML prediction
             raw_df = pd.DataFrame([inputs])
             model_df = add_model_features(raw_df)
-
-            # Ensure model features order & NaNs handling
             X = model_df.reindex(columns=features)
             for c in X.columns:
                 if X[c].isna().any():
                     X[c] = X[c].fillna(0.0)
 
-            # Inference
             proba = model.predict_proba(X.values)[0]
             classes = list(label_enc.classes_)
             pred_idx = int(np.argmax(proba))
             pred_class = label_enc.inverse_transform([pred_idx])[0]
             pred_conf = float(proba[pred_idx])
 
-            # Thresholded flag (for binary setups)
             pos_class = "PLANET" if "PLANET" in classes else classes[pred_idx]
             pos_idx   = classes.index(pos_class)
             is_pos    = proba[pos_idx] >= threshold
 
-            # KPIs
             k1, k2, k3 = st.columns([2,1,1])
             with k1:
-                st.metric("Predicted class", pred_class, help="Class with maximum probability")
+                st.metric("Predicted class", pred_class)
             with k2:
                 st.metric("Confidence", f"{pred_conf:.3f}")
             with k3:
                 st.metric(f"Is {pos_class} @ {threshold:.2f}?", "YES" if is_pos else "NO")
 
-            # Probabilities table + bar
             prob_df = pd.DataFrame({"class": classes, "probability": proba})
             st.write("### Class probabilities")
             st.dataframe(prob_df, use_container_width=True, hide_index=True)
 
             fig = plt.figure(figsize=(5.8, 3.2))
             plt.bar(classes, proba)
-            plt.ylim(0, 1); plt.ylabel("Probability"); plt.title("Class probabilities")
+            plt.ylim(0, 1)
+            plt.ylabel("Probability")
+            plt.title("Class probabilities")
             st.pyplot(fig, clear_figure=True)
 
             with st.expander("Transformed features (MODEL)", expanded=False):
@@ -217,7 +276,7 @@ with tab_batch:
             st.write("## Analysis")
 
             # 1) Histogram of model confidence
-            st.write("**Histogram of predicted confidences (max class)**")
+            st.write("Histogram of predicted confidences (max class)")
             fig = plt.figure(figsize=(6,4))
             plt.hist(out["pred_prob"].dropna().values, bins=30)
             plt.xlabel("max class probability")
@@ -238,14 +297,12 @@ with tab_batch:
                 st.pyplot(fig, clear_figure=True)
 
             if {"pl_orbper","pl_rade"}.issubset(out.columns):
-                st.write("**P–R portrait (TESS columns)**")
+                st.write("P–R portrait (TESS columns)")
                 pr_portrait(out, "pl_orbper", "pl_rade", "P vs R_p (TESS)")
             elif {"koi_period","koi_prad"}.issubset(out.columns):
-                st.write("**P–R portrait (KOI columns)**")
+                st.write("P–R portrait (KOI columns)")
                 pr_portrait(out, "koi_period", "koi_prad", "P vs R_p (KOI)")
-
-            # 3) Correlation heatmap across available astro features
-            st.write("**Correlation heatmap**")
+                st.write("Correlation heatmap")
             corr_cols = [c for c in [
                 "pl_orbper","pl_trandurh","pl_trandep","pl_rade","pl_insol","st_teff","st_logg","st_rad",
                 "koi_period","koi_duration","koi_depth","koi_prad","koi_steff","koi_slogg","koi_srad"
@@ -265,7 +322,7 @@ with tab_batch:
             # 4) Confusion matrix + report if ground-truth exists
             gt_col = next((c for c in LABEL_CANDS if c in out.columns), None)
             if gt_col is not None:
-                st.write(f"**Confusion Matrix** (ground truth: `{gt_col}`)")
+                st.write(f"Confusion Matrix (ground truth: {gt_col})")
                 y_true = normalize_labels(out[gt_col])
                 y_pred = out["pred_class"].astype(str).str.upper().str.strip()
                 labels = sorted(list(set(y_true) | set(y_pred)))
@@ -283,7 +340,7 @@ with tab_batch:
                 plt.colorbar(fraction=0.046, pad=0.04)
                 st.pyplot(fig, clear_figure=True)
 
-                st.write("**Classification report (on uploaded data)**")
+                st.write("Classification report (on uploaded data)")
                 rep = classification_report(y_true, y_pred, labels=labels, output_dict=True)
                 st.json(rep)
             else:
@@ -303,5 +360,3 @@ with tab_batch:
 
 # ──────────────────────────────────────────────────────────────────────────────
 st.caption(f"Artifacts expected at:  **{art_dir_inp}**")
-
-

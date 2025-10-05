@@ -2,3 +2,6 @@ streamlit
 plotly
 pandas
 numpy
+matplotlib
+ml.model_utils
+joblib

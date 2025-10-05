@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>3D Planet (pointer controls)</title>
+  <style>
+    * { box-sizing: border-box; margin:0; padding:0; user-select:none; -webkit-user-select:none; }
+    html, body { height:100%; width:100%; background:#0a0e27; overflow:hidden; touch-action:none; }
+    canvas { display:block; width:100% !important; height:100% !important; cursor:grab; touch-action:none; }
+    canvas:active { cursor:grabbing; }
+    #info {
+      position: absolute; top: 10px; left: 10px; z-index: 100;
+      color: white; font-family: Arial, sans-serif; font-size: 12px;
+      background: rgba(0,0,0,0.7); padding: 8px 12px; border-radius: 4px;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="info">🖱️ Drag to rotate • Scroll to zoom • Touch to rotate</div>
+
+  <script src="https://unpkg.com/three@0.152.2/build/three.min.js"></script>
+
+  <script>
+    // Scene / camera / renderer
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(0, 0, 5);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio || 1);
+    renderer.setClearColor(0x0a0e27);
+    document.body.appendChild(renderer.domElement);
+
+    const canvas = renderer.domElement;
+    // Ensure canvas accepts pointer events
+    canvas.style.touchAction = 'none';
+
+    // Stars background
+    const starsGeometry = new THREE.BufferGeometry();
+    const starsVertices = [];
+    for (let i = 0; i < 8000; i++) {
+      const x = (Math.random() - 0.5) * 2000;
+      const y = (Math.random() - 0.5) * 2000;
+      const z = (Math.random() - 0.5) * 2000;
+      starsVertices.push(x, y, z);
+    }
+    starsGeometry.setAttribute('position', new THREE.Float32BufferAttribute(starsVertices, 3));
+    const starsMaterial = new THREE.PointsMaterial({ color: 0xffffff, size: 1.0 });
+    const stars = new THREE.Points(starsGeometry, starsMaterial);
+    scene.add(stars);
+
+    // Lights
+    const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+    scene.add(ambientLight);
+    const pointLight = new THREE.PointLight(0xffffff, 1.8);
+    pointLight.position.set(8, 5, 8);
+    scene.add(pointLight);
+    const fillLight = new THREE.DirectionalLight(0x6699ff, 0.3);
+    fillLight.position.set(-5, 0, -5);
+    scene.add(fillLight);
+
+    // Planet placeholder (initially null — will be created on message or update)
+    let planet = null;
+
+    // Rotation/inertia state
+    let isPointerDown = false;
+    let activePointerId = null;
+    let prevPointer = { x: 0, y: 0 };
+    let rotationVelocity = { x: 0, y: 0 };
+
+    // Create or replace planet helper
+    function createPlanetVisual(visualRadius, teff) {
+      // cleanup previous
+      if (planet) {
+        scene.remove(planet);
+        if (planet.geometry) planet.geometry.dispose();
+        if (planet.material) planet.material.dispose();
+        planet = null;
+      }
+
+      const geom = new THREE.SphereGeometry(visualRadius, 64, 64);
+
+      // color based on stellar Teff
+      const t = Math.min(Math.max(teff || 5500, 2500), 12000);
+      let color, emissive;
+      if (t < 3700) {
+        const r = (t - 2500) / 1200;
+        color = new THREE.Color(1, 0.2 + r * 0.3, 0.05);
+        emissive = new THREE.Color(0.3, 0, 0);
+      } else if (t < 5200) {
+        const r = (t - 3700) / 1500;
+        color = new THREE.Color(1, 0.5 + r * 0.4, 0.1 + r * 0.4);
+        emissive = new THREE.Color(0.2, 0.1, 0);
+      } else if (t < 6000) {
+        const r = (t - 5200) / 800;
+        color = new THREE.Color(1, 0.9 + r * 0.1, 0.5 + r * 0.4);
+        emissive = new THREE.Color(0.15, 0.15, 0.05);
+      } else if (t < 7500) {
+        const r = (t - 6000) / 1500;
+        color = new THREE.Color(1, 1, 0.85 + r * 0.15);
+        emissive = new THREE.Color(0.1, 0.1, 0.15);
+      } else {
+        const r = Math.min((t - 7500) / 4500, 1);
+        color = new THREE.Color(0.8 + r * 0.1, 0.9 + r * 0.1, 1);
+        emissive = new THREE.Color(0.05, 0.1, 0.2);
+      }
+
+      const mat = new THREE.MeshStandardMaterial({
+        color: color,
+        roughness: 0.5,
+        metalness: 0.2,
+        emissive: emissive,
+        emissiveIntensity: 0.12
+      });
+
+      planet = new THREE.Mesh(geom, mat);
+      scene.add(planet);
+    }
+
+    // Map Earth radii to visual radius
+    function mapEarthRadiusToVisual(R) {
+      // safe handling and mapping to visually pleasant sizes
+      const r = Number(R) || 1;
+      if (r < 1.5) return 0.8 + r * 0.3;      // small: ~0.8-1.25
+      if (r < 4) return 1.1 + (r - 1.5) * 0.4; // medium: ~1.1-2.1
+      return 2.0 + Math.min((r - 4) * 0.15, 1.5); // large: ~2.0-3.5
+    }
+
+    // Pointer event handlers (attached to canvas)
+    canvas.addEventListener('pointerdown', (e) => {
+      // only left button or touch/pen
+      if (e.isPrimary === false) return;
+      isPointerDown = true;
+      activePointerId = e.pointerId;
+      prevPointer.x = e.clientX;
+      prevPointer.y = e.clientY;
+      rotationVelocity.x = 0;
+      rotationVelocity.y = 0;
+      try { canvas.setPointerCapture(activePointerId); } catch (err) {}
+      canvas.style.cursor = 'grabbing';
+    });
+
+    canvas.addEventListener('pointermove', (e) => {
+      if (!isPointerDown || e.pointerId !== activePointerId) return;
+      const deltaX = e.clientX - prevPointer.x;
+      const deltaY = e.clientY - prevPointer.y;
+
+      if (planet) {
+        planet.rotation.y += deltaX * 0.01;
+        planet.rotation.x += deltaY * 0.01;
+        planet.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, planet.rotation.x));
+      }
+
+      rotationVelocity.x = deltaY * 0.01;
+      rotationVelocity.y = deltaX * 0.01;
+
+      prevPointer.x = e.clientX;
+      prevPointer.y = e.clientY;
+    });
+
+    canvas.addEventListener('pointerup', (e) => {
+      if (e.pointerId !== activePointerId) return;
+      isPointerDown = false;
+      try { canvas.releasePointerCapture(activePointerId); } catch (err) {}
+      activePointerId = null;
+      canvas.style.cursor = 'grab';
+    });
+
+    canvas.addEventListener('pointercancel', (e) => {
+      if (e.pointerId !== activePointerId) return;
+      isPointerDown = false;
+      try { canvas.releasePointerCapture(activePointerId); } catch (err) {}
+      activePointerId = null;
+      canvas.style.cursor = 'grab';
+    });
+
+    // Wheel zoom on canvas (prevent page scroll)
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault(); // requires passive: false when adding listener — using default addEventListener works here
+      camera.position.z += e.deltaY * 0.005;
+      camera.position.z = Math.max(2, Math.min(camera.position.z, 20));
+    }, { passive: false });
+
+    // Resize handling
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // Accept messages: support both create_planet and update_params
+    window.addEventListener('message', (event) => {
+      if (!event.data || (event.data.type !== 'create_planet' && event.data.type !== 'update_params')) return;
+      const params = event.data.params || {};
+      const rVis = mapEarthRadiusToVisual(params.planet_radius || params.koi_prad || 1.0);
+      const teff = params.stellar_teff || params.koi_steff || 5500;
+
+      if (event.data.type === 'create_planet') {
+        // create planet only when requested
+        createPlanetVisual(rVis, teff);
+      } else if (event.data.type === 'update_params') {
+        // update in-place (create if missing)
+        if (!planet) createPlanetVisual(rVis, teff);
+        else {
+          // update radius
+          if (params.planet_radius !== undefined || params.koi_prad !== undefined) {
+            const newVis = mapEarthRadiusToVisual(params.planet_radius ?? params.koi_prad);
+            if (planet.geometry) planet.geometry.dispose();
+            planet.geometry = new THREE.SphereGeometry(newVis, 64, 64);
+          }
+          // update color by teff
+          if (params.stellar_teff !== undefined || params.koi_steff !== undefined) {
+            const t = Math.min(Math.max(params.stellar_teff ?? params.koi_steff, 2500), 12000);
+            let color, emissive;
+            if (t < 3700) {
+              const ratio = (t - 2500) / 1200;
+              color = new THREE.Color(1, 0.2 + ratio * 0.3, 0.05);
+              emissive = new THREE.Color(0.3, 0, 0);
+            } else if (t < 5200) {
+              const ratio = (t - 3700) / 1500;
+              color = new THREE.Color(1, 0.5 + ratio * 0.4, 0.1 + ratio * 0.4);
+              emissive = new THREE.Color(0.2, 0.1, 0);
+            } else if (t < 6000) {
+              const ratio = (t - 5200) / 800;
+              color = new THREE.Color(1, 0.9 + ratio * 0.1, 0.5 + ratio * 0.4);
+              emissive = new THREE.Color(0.15, 0.15, 0.05);
+            } else if (t < 7500) {
+              const ratio = (t - 6000) / 1500;
+              color = new THREE.Color(1, 1, 0.85 + ratio * 0.15);
+              emissive = new THREE.Color(0.1, 0.1, 0.15);
+            } else {
+              const ratio = Math.min((t - 7500) / 4500, 1);
+              color = new THREE.Color(0.8 + ratio * 0.1, 0.9 + ratio * 0.1, 1);
+              emissive = new THREE.Color(0.05, 0.1, 0.2);
+            }
+            planet.material.color = color;
+            planet.material.emissive = emissive;
+            planet.material.emissiveIntensity = 0.12;
+          }
+        }
+      }
+    });
+
+    // Animation loop with inertia
+    function animate() {
+      requestAnimationFrame(animate);
+
+      if (!isPointerDown) {
+        // apply inertia
+        if (planet) {
+          planet.rotation.y += rotationVelocity.y;
+          planet.rotation.x += rotationVelocity.x;
+          planet.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, planet.rotation.x));
+        }
+        // damping
+        rotationVelocity.x *= 0.94;
+        rotationVelocity.y *= 0.94;
+
+        // gentle auto-rotation when almost stopped
+        if (Math.abs(rotationVelocity.y) < 0.0001 && planet) {
+          planet.rotation.y += 0.0018;
+        }
+      }
+
+      stars.rotation.y += 0.00008;
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // Debug log
+    console.log('3D planet viewer ready (pointer-based control).');
+  </script>
+</body>
+</html>
