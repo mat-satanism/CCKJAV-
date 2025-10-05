@@ -35,12 +35,10 @@ def main():
     out = df_in.copy()
     out["pred_class"] = pred_cls
     out["pred_prob"]  = maxp
-    # додамо окремо ймовірність PLANET, якщо є
     if "PLANET" in classes:
         pidx = classes.index("PLANET")
         out["proba_planet"] = P[:, pidx]
 
-    # якщо вхід має істинні мітки — нормалізуємо для подальшої валідації
     gt_col = next((c for c in LABEL_CANDS if c in df_in.columns), None)
     if gt_col:
         out["label_norm"] = normalize_labels(df_in[gt_col])

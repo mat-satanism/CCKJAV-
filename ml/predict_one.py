@@ -12,7 +12,6 @@ def predict_one(params: dict, artifacts_dir: str | Path = "artifacts"):
     model, le, features, metrics = load_artifacts(base / artifacts_dir)
 
     raw = pd.DataFrame([{k: params.get(k, np.nan) for k in RAW8}])
-    # трансформуємо у MODEL-фічі
     X, feat_df = _prep_X(raw, features)
     proba = model.predict_proba(X.values)[0]
     classes = list(le.classes_)
@@ -35,7 +34,6 @@ def _prep_X(raw_df: pd.DataFrame, features: list[str]):
     return X, df
 
 if __name__ == "__main__":
-    # CLI: python -m ml.predict_one '{"koi_period":10,"koi_duration":2,...}'
     if len(sys.argv) < 2:
         print("Usage: python -m ml.predict_one '{JSON}'")
         sys.exit(1)

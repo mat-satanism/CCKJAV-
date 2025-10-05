@@ -40,19 +40,15 @@ def main():
     out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
     df = pd.read_csv(args.csv)
 
-    # готуємо MODEL-фічі з KOI-даних (у твоєму CSV вони можуть уже бути — не завадить)
     df = add_model_features(df)
 
-    # вибір і нормалізація мітки
     ycol = pick_label_col(df, args.label_col)
     y_raw = normalize_labels(df[ycol])
 
-    # Бінаризація за замовчуванням: PLANET vs FALSE POSITIVE (CANDIDATE відкидаємо)
     mask = y_raw.isin(["PLANET","FALSE POSITIVE"])
     X = df.loc[mask, BASE_FEATURES].astype(float).copy()
     y_raw = y_raw.loc[mask].reset_index(drop=True)
 
-    # NaN → 0
     for c in X.columns:
         if X[c].isna().any():
             X[c] = X[c].fillna(0.0)
@@ -62,7 +58,6 @@ def main():
 
     Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
-    # балансування
     if args.balance == "class":
         class_weight = "balanced"
         smote = None
@@ -74,7 +69,6 @@ def main():
         class_weight = None
         smote = None
 
-    # модель
     if args.model == "rf":
         clf = RandomForestClassifier(
             n_estimators=400, random_state=42, n_jobs=-1, class_weight=class_weight
@@ -91,7 +85,6 @@ def main():
 
     clf.fit(Xtr, ytr)
 
-    # метрики
     proba = clf.predict_proba(Xte)
     roc = None
     try:
@@ -100,7 +93,6 @@ def main():
         pass
     report = classification_report(yte, clf.predict(Xte), output_dict=True)
 
-    # збереження
     dump(clf, out_dir / "model.joblib")
     dump(le,  out_dir / "label_encoder.joblib")
     (out_dir / "features.json").write_text(json.dumps(BASE_FEATURES, indent=2), encoding="utf-8")

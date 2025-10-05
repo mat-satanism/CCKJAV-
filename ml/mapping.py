@@ -3,19 +3,17 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-# 8 "сирих" ознак (вводяться у вкладці Single, або мапляться з TOI/KOI)
 RAW8 = [
-    "koi_period",   # days
-    "koi_duration", # hours
-    "koi_depth",    # ppm
-    "koi_prad",     # R_Earth
-    "koi_steff",    # K
-    "koi_slogg",    # log g
-    "koi_srad",     # R_Sun
-    "koi_kepmag",   # TESS/Kep magnitude
+    "koi_period",
+    "koi_duration", 
+    "koi_depth", 
+    "koi_prad",
+    "koi_steff", 
+    "koi_slogg",  
+    "koi_srad", 
+    "koi_kepmag",
 ]
 
-# Найчастіші назви колонок у KOI/TOI CSV
 ALIASES = {
     "koi_period":   ["koi_period","pl_orbper","Period","Orbital Period","Period (days)"],
     "koi_duration": ["koi_duration","pl_trandurh","Transit Duration","Duration","tran_dur","tr_duration (hr)","trdur (hr)"],
@@ -27,7 +25,6 @@ ALIASES = {
     "koi_kepmag":   ["koi_kepmag","st_tmag","Tmag","KepMag"],
 }
 
-# Можливі стовпці з мітками у KOI/TOI
 LABEL_CANDS = ["label","koi_disposition","tfopwg_disp","disp_3class","pred_class"]
 
 def _norm(s: str) -> str:
@@ -46,10 +43,6 @@ def _pick(df: pd.DataFrame, opts: list[str]) -> str | None:
     return None
 
 def toi_to_koi_raw(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Прочитує TOI/KOI CSV і повертає таблицю з колонками RAW8.
-    Якщо чогось не вистачає — ставить NaN (не падає).
-    """
     out = pd.DataFrame(index=df.index)
     for k, opts in ALIASES.items():
         col = _pick(df, opts)
@@ -61,25 +54,16 @@ def toi_to_koi_raw(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def add_model_features(raw_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    З RAW8 робимо набір MODEL-фіч:
-      - лог-фічі: log1p для period/depth/prad/srad
-      - флаги пропусків *_missing
-      - (опційно) інсоляція, якщо присутня у вхідному DF як 'koi_insol'
-    """
     df = raw_df.copy()
 
-    # flags
     for c in ["koi_depth","koi_prad","koi_srad","koi_steff","koi_slogg"]:
         df[f"{c}_missing"] = df[c].isna().astype(int)
 
-    # logs (safe)
     df["koi_period_log"] = np.log1p(pd.to_numeric(df["koi_period"], errors="coerce").clip(lower=0))
     df["koi_depth_log"]  = np.log1p(pd.to_numeric(df["koi_depth"],  errors="coerce").clip(lower=0))
     df["koi_prad_log"]   = np.log1p(pd.to_numeric(df["koi_prad"],   errors="coerce").clip(lower=0))
     df["koi_srad_log"]   = np.log1p(pd.to_numeric(df["koi_srad"],   errors="coerce").clip(lower=0))
 
-    # optional insolation if present (already KOI-like name)
     if "koi_insol" in raw_df.columns:
         v = pd.to_numeric(raw_df["koi_insol"], errors="coerce")
         df["koi_insol_log"]     = np.log1p(v.clip(lower=0))
@@ -88,11 +72,7 @@ def add_model_features(raw_df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def normalize_labels(s: pd.Series) -> pd.Series:
-    """
-    Уніфікує позначення у PLANET / CANDIDATE / FALSE POSITIVE.
-    Стійко обробляє NaN та змішані типи.
-    """
-    x = s.astype("string")  # pandas StringDtype, зручно для .str-операцій
+    x = s.astype("string")
     x = x.str.strip().str.upper()
 
     x = x.replace({
@@ -105,6 +85,5 @@ def normalize_labels(s: pd.Series) -> pd.Series:
         "FALSE-POSITIVE": "FALSE POSITIVE",
     })
 
-    # інколи трапляються порожні / None → маркуємо як "CANDIDATE" за замовчуванням або залишаємо як є
     x = x.fillna("CANDIDATE")
     return x
