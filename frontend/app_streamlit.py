@@ -200,7 +200,13 @@ with tab_single:
 with tab_batch:
     st.subheader("📦 Batch analysis (TOI/TESS/KOI CSV)")
     up = st.file_uploader("Upload CSV", type=["csv", "txt"])
+    # logging
+    log_box = st.checkbox("Show step-by-step logs", value=False)
+    logs: list[str] = []
 
+    def log(msg: str):
+        if log_box:
+            logs.append(msg)
 
     if up is not None and artifacts_ok:
         try:
