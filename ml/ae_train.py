@@ -9,68 +9,41 @@ from joblib import dump
 from tensorflow import keras
 from tensorflow.keras import layers
 
-RAW_FEATURES = [
-    "koi_period", "koi_duration", "koi_depth", "koi_prad",
-    "koi_steff", "koi_slogg", "koi_srad", "koi_kepmag",
-]
+RAW8 = ["koi_period","koi_duration","koi_depth","koi_prad",
+        "koi_steff","koi_slogg","koi_srad","koi_kepmag"]
 
-
-def build_autoencoder(input_dim: int, encoding_dim: int = 8) -> tuple[keras.Model, keras.Model]:
-    inp = layers.Input(shape=(input_dim,))
+def build_autoencoder(n_in: int, code_dim: int = 8):
+    inp = layers.Input(shape=(n_in,))
     x = layers.Dense(16, activation="relu")(inp)
-    code = layers.Dense(encoding_dim, activation="relu")(x)
+    code = layers.Dense(code_dim, activation="relu")(x)
     x = layers.Dense(16, activation="relu")(code)
-    # Linear output because inputs are standardized (zero mean / unit var)
-    out = layers.Dense(input_dim, activation=None)(x)
-    ae = keras.Model(inp, out)
-    enc = keras.Model(inp, code)
-    return ae, enc
-
+    out = layers.Dense(n_in, activation=None)(x)  # лінійний вихід (бо standardized)
+    return keras.Model(inp, out), keras.Model(inp, code)
 
 def main():
-    base_dir = Path(__file__).resolve().parents[1]
-    data_path = base_dir / "data" / "cleaned" / "KOI_clean_for_learning.csv"
-    out_dir = base_dir / "artifacts_ae"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    base = Path(__file__).resolve().parents[1]
+    df = pd.read_csv(base / "data/cleaned/KOI_clean_for_learning.csv")
+    X = df[RAW8].astype(float).replace([np.inf,-np.inf], np.nan)
+    X = X.fillna(X.mean())
 
-    df = pd.read_csv(data_path)
-    X = df[RAW_FEATURES].copy()
-    X_filled = X.astype(float).replace([np.inf, -np.inf], np.nan)
-    X_filled = X_filled.fillna(X_filled.mean())
+    scaler = StandardScaler().fit(X.values)
+    Xn = scaler.transform(X.values)
 
-    scaler = StandardScaler().fit(X_filled.values)
-    Xn = scaler.transform(X_filled.values)
-
-    ae, enc = build_autoencoder(Xn.shape[1], encoding_dim=8)
+    ae, enc = build_autoencoder(Xn.shape[1], code_dim=8)
     ae.compile(optimizer=keras.optimizers.Adam(1e-3), loss="mse")
     ae.fit(Xn, Xn, epochs=50, batch_size=32, shuffle=True, verbose=1)
 
     Z = enc.predict(Xn, verbose=0)
+    km = KMeans(n_clusters=5, n_init="auto", random_state=42).fit(Z)
 
-    N_CLUST = 5
-    km = KMeans(n_clusters=N_CLUST, n_init="auto", random_state=42)
-    km.fit(Z)
+    out = base / "artifacts_ae"; out.mkdir(exist_ok=True)
+    ae.save(out / "autoencoder_full.h5")
+    enc.save(out / "encoder_model.h5")
+    dump(scaler, out / "scaler.joblib")
+    dump(km, out / "kmeans.joblib")
+    (out / "config.json").write_text(json.dumps({"n_clusters":5,"features":RAW8}, indent=2))
 
-    ae.save(out_dir / "autoencoder_full.h5")
-    enc.save(out_dir / "encoder_model.h5")
-    dump(scaler, out_dir / "scaler.joblib")
-    dump(km, out_dir / "kmeans.joblib")
-
-    (out_dir / "config.json").write_text(json.dumps({
-        "n_clusters": N_CLUST,
-        "features": RAW_FEATURES,
-        "encoding_dim": 8
-    }, indent=2), encoding="utf-8")
-
-    labels, counts = np.unique(km.labels_, return_counts=True)
-    eval_report = {
-        "cluster_sizes": {int(l): int(c) for l, c in zip(labels, counts)},
-        "cluster_label_map": {}
-    }
-    (out_dir / "eval_report.json").write_text(json.dumps(eval_report, indent=2), encoding="utf-8")
-
-    print("[AE] Artifacts saved to:", out_dir)
-
+    print("[AE] saved →", out)
 
 if __name__ == "__main__":
     main()

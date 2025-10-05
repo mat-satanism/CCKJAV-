@@ -2,54 +2,78 @@ from __future__ import annotations
 import pandas as pd
 import numpy as np
 
-RAW_FEATURES = [
-    'koi_period','koi_duration','koi_depth','koi_prad',
-    'koi_steff','koi_slogg','koi_srad','koi_kepmag'
+# KOI-узгоджені "сирі" фічі (RAW8)
+RAW8 = [
+    "koi_period","koi_duration","koi_depth","koi_prad",
+    "koi_steff","koi_slogg","koi_srad","koi_kepmag"
 ]
 
+# Поширені варіанти назв у KOI/TOI/TESS (враховано архівний TESS.csv і твій tess_cleaned)
 ALIASES = {
-    'koi_period':   ['pl_orbper','Period','Orbital Period','Period (days)'],
-    'koi_duration': ['pl_trandurh','Transit Duration','Duration','tran_dur','tr_duration (hr)','trdur (hr)'],
-    'koi_depth':    ['pl_trandep','Transit Depth','Depth','tr_depth (ppm)','depth_ppm'],
-    'koi_prad':     ['pl_rade','Planet Radius','Rp','rp_rearth'],
-    'koi_steff':    ['st_teff','Teff','T_eff'],
-    'koi_slogg':    ['st_logg','logg'],
-    'koi_srad':     ['st_rad','Rstar','R_star (R_Sun)'],
-    'koi_kepmag':   ['st_tmag','Tmag','KepMag'],
+    "koi_period":   ["koi_period","pl_orbper","Period","Orbital Period","orbper","period_days","log_orbper"],
+    "koi_duration": ["koi_duration","pl_trandurh","Transit Duration","Duration","tran_dur","tr_duration (hr)","trdur (hr)","trdur","tdur","t_dur","duration_hr","duration_hrs","dur_hr","dur_hrs","dur (hr)","transit_dur","transit_duration"],
+    "koi_depth":    ["koi_depth","pl_trandep","Transit Depth","Depth","tr_depth (ppm)","depth_ppm","trdepthppm","log_trandep","depth_norm"],
+    "koi_prad":     ["koi_prad","pl_rade","Planet Radius","Rp","rp_rearth","radius_re","pl_rade_re","sqrt_pl_rade","rel_radius"],
+    "koi_steff":    ["koi_steff","st_teff","Teff","T_eff","teff"],
+    "koi_slogg":    ["koi_slogg","st_logg","logg","log_g","stlogg"],
+    "koi_srad":     ["koi_srad","st_rad","Rstar","R_star (R_Sun)","rstar","st_radius"],
+    "koi_kepmag":   ["koi_kepmag","st_tmag","Tmag","KepMag","kepmag","tmag"],
+    # опції, якщо є
+    "koi_insol":    ["koi_insol","pl_insol","insol","insolation"],
+    "koi_eqt":      ["koi_eqt","pl_eqt","eqt","eq_temperature"],
 }
 
-
-def _normalize(name: str) -> str:
-    return name.lower().replace(" ", "").replace("_", "").replace("(days)","")\
-        .replace("(hours)","").replace("(ppm)","").replace("(r_earth)","")
+LABEL_CANDS = ["label","koi_disposition","tfopwg_disp","disp_3class","pred_class"]
 
 
-def pick_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
-    norm2orig = { _normalize(c): c for c in df.columns }
-    for cand in candidates:
-        key = _normalize(cand)
+def _norm(s: str) -> str:
+    s = s.lower()
+    for ch in " _-()[]{}:/,":
+        s = s.replace(ch, "")
+    s = s.replace("hours","hr").replace("hour","hr").replace("hrs","hr").replace(" h","hr")
+    s = s.replace("days","day").replace(" d","day")
+    s = s.replace("ppm","")
+    return s
+
+
+def _pick_col(df: pd.DataFrame, names: list[str]) -> str|None:
+    norm2orig = {_norm(c): c for c in df.columns}
+    for cand in names:
+        key = _norm(cand)
         if key in norm2orig:
             return norm2orig[key]
+    # додаткова евристика для duration
+    for c in df.columns:
+        n = _norm(c)
+        if ("dur" in n or "duration" in n or n.startswith("tdur") or n.startswith("trdur")) and ("hr" in n or "duration" in n or "dur" in n):
+            return c
     return None
 
 
-def toi_to_koi_raw(df: pd.DataFrame) -> pd.DataFrame:
-    out = pd.DataFrame()
-    for k, opts in ALIASES.items():
-        col = pick_column(df, opts)
+def toi_to_koi_raw(df_in: pd.DataFrame) -> pd.DataFrame:
+    """Витягнути KOI-подібні RAW8 з будь-якої TOI/TESS/cleaned таблиці."""
+    out = pd.DataFrame(index=df_in.index)
+    missing = []
+    for k in RAW8:
+        col = _pick_col(df_in, ALIASES.get(k, [k]))
         if col is None:
-            raise ValueError(f"Required column for {k} not found; tried {opts[:4]}...")
-        out[k] = pd.to_numeric(df[col], errors='coerce')
-    out = out.replace([np.inf, -np.inf], np.nan)
+            missing.append(k)
+        else:
+            out[k] = pd.to_numeric(df_in[col], errors="coerce")
+    # не критично відсутні (опції)
+    for k in ["koi_insol","koi_eqt"]:
+        col = _pick_col(df_in, ALIASES.get(k, [k]))
+        out[k] = pd.to_numeric(df_in[col], errors="coerce") if col else np.nan
+    if missing:
+        # дамо підказку користувачу
+        avail = list(df_in.columns)[:50]
+        raise KeyError(f"Не знайшов колонки для: {missing}. Перевір назви у вхідному CSV. Перші 50 колонок: {avail}")
     return out
 
 
-def add_model_features(raw_df: pd.DataFrame) -> pd.DataFrame:
-    df = raw_df.copy()
-    for c in ['koi_depth', 'koi_prad', 'koi_srad', 'koi_steff', 'koi_slogg']:
-        df[f"{c}_missing"] = df[c].isna().astype(int)
-    df['koi_period_log'] = np.log1p(df['koi_period'].clip(lower=0))
-    df['koi_depth_log']  = np.log1p(df['koi_depth'].clip(lower=0))
-    df['koi_prad_log']   = np.log1p(df['koi_prad'].clip(lower=0))
-    df['koi_srad_log']   = np.log1p(df['koi_srad'].clip(lower=0))
-    return df
+def normalize_labels(y: pd.Series) -> pd.Series:
+    """Нормалізувати KOI/TOI диспо до PLANET vs FALSE POSITIVE (PC/Candidate → ігноруємо у бінарці)."""
+    s = y.astype(str).str.upper().str.strip()
+    s = s.replace({"CONFIRMED":"PLANET","CP":"PLANET","KP":"PLANET","PC":"CANDIDATE","CANDIDATE":"CANDIDATE"})
+    s = s.replace({"FP":"FALSE POSITIVE","FALSEPOSITIVE":"FALSE POSITIVE"})
+    return s
