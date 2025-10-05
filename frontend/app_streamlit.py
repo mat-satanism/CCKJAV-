@@ -318,9 +318,6 @@ with tab_batch:
                 plt.colorbar(fraction=0.046, pad=0.04)
                 st.pyplot(fig, clear_figure=True)
 
-                st.write("Classification report (on uploaded data)")
-                rep = classification_report(y_true, y_pred, labels=labels, output_dict=True)
-                st.json(rep)
             else:
                 st.info("Ground truth labels not found in uploaded CSV — confusion matrix is skipped.")
 
