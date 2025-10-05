@@ -20,7 +20,7 @@ from ml.model_utils import load_artifacts, ensure_features
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Exoplanet Classifier", layout="wide", initial_sidebar_state="expanded")
 
-st.title("🔭 Exoplanet Classifier — ML Demo")
+st.title("🔭 Exoplanet Classifier")
 
 # Sidebar
 st.sidebar.header("⚙️ Settings")
