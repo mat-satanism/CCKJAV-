@@ -85,5 +85,5 @@ def main():
     else:
         print("No label column provided; skipping metrics.")
 
-if __name__ == "main":
+if __name__ == "__main__":
     main()
