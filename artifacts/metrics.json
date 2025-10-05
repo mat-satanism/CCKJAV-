@@ -1,0 +1,37 @@
+{
+  "roc_auc_ovr": 0.9718016604193953,
+  "classification_report": {
+    "0": {
+      "precision": 0.926954732510288,
+      "recall": 0.9307851239669421,
+      "f1-score": 0.9288659793814433,
+      "support": 968.0
+    },
+    "1": {
+      "precision": 0.8770642201834863,
+      "recall": 0.8706739526411658,
+      "f1-score": 0.8738574040219378,
+      "support": 549.0
+    },
+    "accuracy": 0.9090309822017139,
+    "macro avg": {
+      "precision": 0.9020094763468871,
+      "recall": 0.9007295383040539,
+      "f1-score": 0.9013616917016906,
+      "support": 1517.0
+    },
+    "weighted avg": {
+      "precision": 0.9088994317407336,
+      "recall": 0.9090309822017139,
+      "f1-score": 0.908958459360106,
+      "support": 1517.0
+    }
+  },
+  "classes": [
+    "FALSE POSITIVE",
+    "PLANET"
+  ],
+  "label_col": "koi_disposition",
+  "binary": true,
+  "balance": "class"
+}
