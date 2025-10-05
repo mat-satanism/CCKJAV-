@@ -29,27 +29,6 @@ default_art = ROOT / "artifacts"
 art_dir_inp = st.sidebar.text_input("Artifacts path", value=str(default_art))
 threshold = st.sidebar.slider("Decision threshold (for positive class)", 0.0, 1.0, 0.5, 0.01)
 
-# Example downloads
-ex_col1, ex_col2 = st.sidebar.columns(2)
-with ex_col1:
-    st.download_button(
-        "Example CSV",
-        data=(ROOT / "data" / "example_batch.csv").read_bytes() if (ROOT / "data" / "example_batch.csv").exists()
-             else b"toi,tid,tfopwg_disp,pl_orbper,pl_trandurh,pl_trandep,pl_rade,st_teff,st_logg,st_rad,st_tmag\n",
-        file_name="example_batch.csv", mime="text/csv",
-        help="Example file for Batch tab"
-    )
-with ex_col2:
-    st.download_button(
-        "Example ONE",
-        data=json.dumps({
-            "koi_period": 10, "koi_duration": 2, "koi_depth": 600, "koi_prad": 1.4,
-            "koi_steff": 5600, "koi_slogg": 4.4, "koi_srad": 1.0, "koi_kepmag": 11.8
-        }, indent=2).encode("utf-8"),
-        file_name="example_one.json", mime="application/json",
-        help="Example JSON for single prediction"
-    )
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Cache helpers
 @st.cache_resource(show_spinner=False)
