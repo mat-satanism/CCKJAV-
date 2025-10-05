@@ -27,6 +27,7 @@ st.sidebar.header("⚙️ Settings")
 
 default_art = ROOT / "artifacts"
 art_dir_inp = st.sidebar.text_input("Artifacts path", value=str(default_art))
+threshold = st.sidebar.slider("Decision threshold (for positive class)", 0.0, 1.0, 0.5, 0.01)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Cache helpers
