@@ -1,11 +1,9 @@
 # ml/mapping.py
 from __future__ import annotations
-import pandas as pd
 import numpy as np
-from ml.mapping import RAW8, toi_to_koi_raw, add_model_features, LABEL_CANDS, normalize_labels
+import pandas as pd
 
-
-# 8 "сирих" ознак, які користувач вводить у першій вкладці
+# 8 "сирих" ознак (вводяться у вкладці Single, або мапляться з TOI/KOI)
 RAW8 = [
     "koi_period",   # days
     "koi_duration", # hours
@@ -17,7 +15,7 @@ RAW8 = [
     "koi_kepmag",   # TESS/Kep magnitude
 ]
 
-# можливі назви у KOI/TOI (Exoplanet Archive)
+# Найчастіші назви колонок у KOI/TOI CSV
 ALIASES = {
     "koi_period":   ["koi_period","pl_orbper","Period","Orbital Period","Period (days)"],
     "koi_duration": ["koi_duration","pl_trandurh","Transit Duration","Duration","tran_dur","tr_duration (hr)","trdur (hr)"],
@@ -29,18 +27,14 @@ ALIASES = {
     "koi_kepmag":   ["koi_kepmag","st_tmag","Tmag","KepMag"],
 }
 
+# Можливі стовпці з мітками у KOI/TOI
 LABEL_CANDS = ["label","koi_disposition","tfopwg_disp","disp_3class","pred_class"]
 
 def _norm(s: str) -> str:
     return (
-        s.lower()
-         .replace(" ", "")
-         .replace("_","")
-         .replace("(days)","")
-         .replace("(hours)","")
-         .replace("(ppm)","")
-         .replace("(r_sun)","")
-         .replace("(r_earth)","")
+        s.lower().replace(" ","").replace("_","")
+         .replace("(days)","").replace("(hours)","")
+         .replace("(ppm)","").replace("(r_sun)","").replace("(r_earth)","")
     )
 
 def _pick(df: pd.DataFrame, opts: list[str]) -> str | None:
@@ -52,52 +46,65 @@ def _pick(df: pd.DataFrame, opts: list[str]) -> str | None:
     return None
 
 def toi_to_koi_raw(df: pd.DataFrame) -> pd.DataFrame:
-    """Вибирає/перейменовує колонки з TOI/KOI у єдині RAW8."""
+    """
+    Прочитує TOI/KOI CSV і повертає таблицю з колонками RAW8.
+    Якщо чогось не вистачає — ставить NaN (не падає).
+    """
     out = pd.DataFrame(index=df.index)
-    missing = []
     for k, opts in ALIASES.items():
         col = _pick(df, opts)
         if col is None:
-            missing.append(k)
             out[k] = np.nan
         else:
             out[k] = pd.to_numeric(df[col], errors="coerce")
-    if missing:
-        # не падаємо, але корисно знати
-        # raise KeyError(f"Не знайшов колонки для: {missing}. Перевір файл.")
-        pass
     out.replace([np.inf,-np.inf], np.nan, inplace=True)
     return out
 
 def add_model_features(raw_df: pd.DataFrame) -> pd.DataFrame:
-    """З RAW8 робимо повний набір для моделі (лог-фічі + flags пропусків)."""
+    """
+    З RAW8 робимо набір MODEL-фіч:
+      - лог-фічі: log1p для period/depth/prad/srad
+      - флаги пропусків *_missing
+      - (опційно) інсоляція, якщо присутня у вхідному DF як 'koi_insol'
+    """
     df = raw_df.copy()
-    # флаги пропусків
+
+    # flags
     for c in ["koi_depth","koi_prad","koi_srad","koi_steff","koi_slogg"]:
         df[f"{c}_missing"] = df[c].isna().astype(int)
 
-    # лог-фічі (безпечні)
-    df["koi_period_log"] = np.log1p(df["koi_period"].clip(lower=0))
-    df["koi_depth_log"]  = np.log1p(df["koi_depth"].clip(lower=0))
-    df["koi_prad_log"]   = np.log1p(df["koi_prad"].clip(lower=0))
-    df["koi_srad_log"]   = np.log1p(df["koi_srad"].clip(lower=0))
+    # logs (safe)
+    df["koi_period_log"] = np.log1p(pd.to_numeric(df["koi_period"], errors="coerce").clip(lower=0))
+    df["koi_depth_log"]  = np.log1p(pd.to_numeric(df["koi_depth"],  errors="coerce").clip(lower=0))
+    df["koi_prad_log"]   = np.log1p(pd.to_numeric(df["koi_prad"],   errors="coerce").clip(lower=0))
+    df["koi_srad_log"]   = np.log1p(pd.to_numeric(df["koi_srad"],   errors="coerce").clip(lower=0))
 
-    # якщо є інсоляція — теж додамо
+    # optional insolation if present (already KOI-like name)
     if "koi_insol" in raw_df.columns:
-        df["koi_insol_log"]     = np.log1p(pd.to_numeric(raw_df["koi_insol"], errors="coerce").clip(lower=0))
-        df["koi_insol_missing"] = raw_df["koi_insol"].isna().astype(int)
+        v = pd.to_numeric(raw_df["koi_insol"], errors="coerce")
+        df["koi_insol_log"]     = np.log1p(v.clip(lower=0))
+        df["koi_insol_missing"] = v.isna().astype(int)
 
     return df
 
 def normalize_labels(s: pd.Series) -> pd.Series:
-    """Нормалізує мітки KOI/TOI у PLANET / CANDIDATE / FALSE POSITIVE."""
-    x = s.astype(str).str.upper().str.strip()
-    mapping = {
+    """
+    Уніфікує позначення у PLANET / CANDIDATE / FALSE POSITIVE.
+    Стійко обробляє NaN та змішані типи.
+    """
+    x = s.astype("string")  # pandas StringDtype, зручно для .str-операцій
+    x = x.str.strip().str.upper()
+
+    x = x.replace({
         "CONFIRMED": "PLANET",
         "CP": "PLANET",
         "PC": "CANDIDATE",
         "FP": "FALSE POSITIVE",
         "FALSEPOSITIVE": "FALSE POSITIVE",
-    }
-    x = x.replace(mapping)
+        "FALSE POSITIVES": "FALSE POSITIVE",
+        "FALSE-POSITIVE": "FALSE POSITIVE",
+    })
+
+    # інколи трапляються порожні / None → маркуємо як "CANDIDATE" за замовчуванням або залишаємо як є
+    x = x.fillna("CANDIDATE")
     return x

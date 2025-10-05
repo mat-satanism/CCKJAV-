@@ -1,0 +1,15 @@
+[
+  "koi_period_log",
+  "koi_duration",
+  "koi_depth_log",
+  "koi_prad_log",
+  "koi_steff",
+  "koi_slogg",
+  "koi_srad_log",
+  "koi_kepmag",
+  "koi_depth_missing",
+  "koi_prad_missing",
+  "koi_srad_missing",
+  "koi_steff_missing",
+  "koi_slogg_missing"
+]

@@ -1,237 +1,307 @@
-# ml/app_streamlit.py
 from __future__ import annotations
-import json, io
+import os, sys, json, io
 from pathlib import Path
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import streamlit as st
-from joblib import load
+import matplotlib.pyplot as plt
 
-from mapping import RAW8, toi_to_koi_raw, add_model_features, LABEL_CANDS, normalize_labels
+# ──────────────────────────────────────────────────────────────────────────────
+# Make project root importable → we can use `ml.*`
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-st.set_page_config(page_title="Exoplanet Classifier (KOI→TESS)", layout="wide")
+# Backend utils
+from ml.mapping import RAW8, add_model_features, toi_to_koi_raw, LABEL_CANDS, normalize_labels
+from ml.model_utils import load_artifacts, ensure_features
 
-# ---------------------------
-# Helpers
-# ---------------------------
-def log(msg: str):
-    st.session_state.setdefault("log", [])
-    st.session_state["log"].append(msg)
+# ──────────────────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="Exoplanet Classifier", layout="wide")
+st.title("🔭 Exoplanet Classifier — ML Demo")
 
-def load_artifacts(art_dir: Path):
-    model = load(art_dir / "model.joblib")
-    label_enc = load(art_dir / "label_encoder.joblib")
-    features = json.loads((art_dir / "features.json").read_text())
-    metrics = json.loads((art_dir / "metrics.json").read_text())
-    return model, label_enc, features, metrics
+# Sidebar
+st.sidebar.header("⚙️ Settings")
 
-def prepare_X_from_raw(raw_df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
-    df = add_model_features(raw_df)
-    X = df.reindex(columns=features)
-    # заповнюємо NaN нулями (бо є флаги *_missing)
-    for c in X.columns:
-        if X[c].isna().any():
-            X[c] = X[c].fillna(0.0)
-    return X, df
+default_art = ROOT / "artifacts"
+art_dir_inp = st.sidebar.text_input("Artifacts path", value=str(default_art))
+threshold = st.sidebar.slider("Decision threshold (for positive class)", 0.0, 1.0, 0.5, 0.01)
 
-def figure_to_bytes(fig) -> bytes:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=180, bbox_inches="tight")
-    plt.close(fig)
-    buf.seek(0)
-    return buf.getvalue()
+# Example downloads (to mirror your deployed app UX)
+ex_col1, ex_col2 = st.sidebar.columns(2)
+with ex_col1:
+    st.download_button(
+        "Example CSV",
+        data=(ROOT / "data" / "example_batch.csv").read_bytes() if (ROOT / "data" / "example_batch.csv").exists()
+             else b"toi,tid,tfopwg_disp,pl_orbper,pl_trandurh,pl_trandep,pl_rade,st_teff,st_logg,st_rad,st_tmag\n",
+        file_name="example_batch.csv", mime="text/csv",
+        help="Пример файлу для вкладки Batch"
+    )
+with ex_col2:
+    st.download_button(
+        "Example ONE",
+        data=json.dumps({
+            "koi_period": 10, "koi_duration": 2, "koi_depth": 600, "koi_prad": 1.4,
+            "koi_steff": 5600, "koi_slogg": 4.4, "koi_srad": 1.0, "koi_kepmag": 11.8
+        }, indent=2).encode("utf-8"),
+        file_name="example_one.json", mime="application/json",
+        help="Пример JSON для одиночного прогнозу"
+    )
 
-def bar_probs(classes: list[str], probs: np.ndarray, title: str):
-    fig = plt.figure(figsize=(4.5,3.2))
-    plt.bar(classes, probs)
-    plt.ylim(0,1)
-    plt.ylabel("Probability")
-    plt.title(title)
-    return fig
+# ──────────────────────────────────────────────────────────────────────────────
+# Cache helpers
+@st.cache_resource(show_spinner=False)
+def _load_artifacts_cached(path_str: str):
+    return load_artifacts(Path(path_str))
 
-def hist_max_proba(maxp: np.ndarray, title="Histogram of Max Probability"):
-    fig = plt.figure(figsize=(6,3.2))
-    plt.hist(maxp, bins=25)
-    plt.xlabel("Max class probability")
-    plt.ylabel("Count")
-    plt.title(title)
-    return fig
+@st.cache_data(show_spinner=False)
+def _build_features_cached(df_in: pd.DataFrame, features: list[str]):
+    return ensure_features(df_in, features)
 
-def confusion_if_labels(y_true: pd.Series, y_pred: np.ndarray, ordered):
-    from sklearn.metrics import confusion_matrix, classification_report
-    M = confusion_matrix(y_true, y_pred, labels=ordered)
-    fig = plt.figure(figsize=(5,4))
-    plt.imshow(M, cmap="Blues")
-    plt.xticks(range(len(ordered)), ordered, rotation=45, ha="right")
-    plt.yticks(range(len(ordered)), ordered)
-    for i in range(M.shape[0]):
-        for j in range(M.shape[1]):
-            plt.text(j, i, str(M[i,j]), ha="center", va="center", color="black")
-    plt.title("Confusion Matrix on provided labels")
-    plt.colorbar(fraction=0.046, pad=0.04)
-    return fig, classification_report(y_true, y_pred, labels=ordered, output_dict=True)
-
-# ---------------------------
-# Sidebar (artifacts & options)
-# ---------------------------
-base_dir = Path(__file__).resolve().parents[1]
-st.sidebar.subheader("Artifacts")
-art_dir = Path(st.sidebar.text_input("Path to artifacts", str(base_dir / "artifacts")))
-threshold = st.sidebar.slider("High-confidence threshold", 0.5, 0.99, 0.80, 0.01)
-
-# Load artifacts
+# Try load artifacts
+model = label_enc = features = metrics = None
+artifacts_ok = False
 try:
-    model, label_enc, FEATURES, METR = load_artifacts(art_dir)
-    st.sidebar.success("Artifacts loaded")
+    model, label_enc, features, metrics = _load_artifacts_cached(art_dir_inp)
+    artifacts_ok = True
 except Exception as e:
-    st.sidebar.error(f"Failed to load artifacts: {e}")
-    st.stop()
+    st.sidebar.error(f"Artifacts not loaded: {e}")
 
-CLASSES = list(label_enc.classes_)
-
-# ---------------------------
-# Tabs
-# ---------------------------
-tab1, tab2 = st.tabs(["Single Object (8 features)", "Batch CSV (TOI/TESS)"])
-
-# ===========================
-# Tab 1 — Single
-# ===========================
-with tab1:
-    st.header("Interactive prediction for a single object")
-    cols = st.columns(4)
-    vals = {}
-    nice = {
-        "koi_period":   "Orbital period (days)",
-        "koi_duration": "Transit duration (hours)",
-        "koi_depth":    "Transit depth (ppm)",
-        "koi_prad":     "Planet radius (R_Earth)",
-        "koi_steff":    "Star Teff (K)",
-        "koi_slogg":    "Star logg",
-        "koi_srad":     "Star radius (R_Sun)",
-        "koi_kepmag":   "TESS/Kep magnitude",
-    }
-    for i, k in enumerate(RAW8):
-        with cols[i % 4]:
-            vals[k] = st.number_input(nice[k], value=float("nan"))
-
-    if st.button("Predict", type="primary"):
-        log("[single] Building raw dataframe…")
-        raw_df = pd.DataFrame([{k: (None if np.isnan(v) else v) for k, v in vals.items()}])
-
-        # Build model features
-        X, full_df = prepare_X_from_raw(raw_df, FEATURES)
-        log("[single] Features prepared")
-
-        # Predict
-        proba = model.predict_proba(X.values)[0]
-        pred_idx = int(np.argmax(proba))
-        pred_cls = label_enc.inverse_transform([pred_idx])[0]
-        st.subheader(f"Predicted class: **{pred_cls}**")
-
-        # Probabilities table + bar
-        st.write(pd.DataFrame({"class": CLASSES, "probability": proba}))
-        st.image(figure_to_bytes(bar_probs(CLASSES, proba, "Class probabilities")))
-
-        # Details: transformed features
-        with st.expander("Show transformed features (what went into the model)"):
-            st.dataframe(full_df.reindex(columns=FEATURES))
-
-        # Model metrics (from training)
-        st.markdown("### Model metrics (from training)")
-        colm = st.columns(3)
-        with colm[0]:
-            st.metric("ROC-AUC (OVR)", f"{METR.get('roc_auc_ovr', None)}")
-        with colm[1]:
-            st.write("Classes:", METR.get("classes", []))
-        with colm[2]:
-            st.write("Label column:", METR.get("label_col", "—"))
-        st.write("Classification report (train holdout):")
-        st.json(METR.get("classification_report", {}))
-
-        # High-confidence flag
-        st.info(f"High-confidence (>{threshold:.2f})? → **{proba[pred_idx] >= threshold}** (p={proba[pred_idx]:.3f})", icon="✅")
-
-        # Log
-        with st.expander("Logs"):
-            st.code("\n".join(st.session_state.get("log", [])) or "<no logs>")
-
-# ===========================
-# Tab 2 — Batch
-# ===========================
-with tab2:
-    st.header("Batch predictions for TOI/TESS CSV")
-    f = st.file_uploader("Upload TOI/TESS CSV (NASA archive export is OK)", type=["csv","txt"])
-    if f is not None:
+if artifacts_ok:
+    with st.sidebar.expander("Model metrics (from metrics.json)", expanded=False):
         try:
-            log("[batch] Reading CSV (skipping commented lines)…")
-            df_in = pd.read_csv(f, comment="#", engine="python")
-            st.write("Detected columns:", list(df_in.columns)[:40])
+            st.write({"roc_auc_ovr": metrics.get("roc_auc_ovr")})
+            cr = metrics.get("classification_report")
+            if cr:
+                st.write("classification_report:")
+                st.json(cr)
+            st.caption(f"Label col: {metrics.get('label_col')}, classes: {metrics.get('classes')}")
+        except Exception as e:
+            st.warning(f"Cannot display metrics: {e}")
 
-            log("[batch] Mapping to RAW8…")
-            raw_df = toi_to_koi_raw(df_in)
+# ──────────────────────────────────────────────────────────────────────────────
+tab_single, tab_batch = st.tabs(["Single Object", "Batch (CSV)"])
 
-            log("[batch] Building model features…")
-            X, feat_df = prepare_X_from_raw(raw_df, FEATURES)
+# =============================================================================
+# TAB 1: Single Object
+# =============================================================================
+with tab_single:
+    st.subheader("🛰️ Interactive prediction for a single candidate")
+    st.caption("Введи 8 сирих параметрів. Модель побудує фічі, порахує ймовірності та пояснить деталі.")
 
-            log("[batch] Running inference…")
+    cols = st.columns(4)
+    inputs = {}
+    fields = [
+        ("koi_period", "Orbital period (days)"),
+        ("koi_duration", "Transit duration (hours)"),
+        ("koi_depth", "Transit depth (ppm)"),
+        ("koi_prad", "Planet radius (R_Earth)"),
+        ("koi_steff", "Stellar Teff (K)"),
+        ("koi_slogg", "Stellar log g"),
+        ("koi_srad", "Stellar radius (R_Sun)"),
+        ("koi_kepmag", "TESS/Kep magnitude"),
+    ]
+    for i, (key, label) in enumerate(fields):
+        with cols[i % 4]:
+            val = st.number_input(label, value=float("nan"))
+            inputs[key] = None if np.isnan(val) else float(val)
+
+    if st.button("Predict", use_container_width=True, type="primary", disabled=not artifacts_ok):
+        if not artifacts_ok:
+            st.error("Artifacts not loaded")
+        else:
+            # RAW8 → MODEL features
+            raw_df = pd.DataFrame([inputs])
+            model_df = add_model_features(raw_df)
+
+            # Ensure model features order & NaNs handling
+            X = model_df.reindex(columns=features)
+            for c in X.columns:
+                if X[c].isna().any():
+                    X[c] = X[c].fillna(0.0)
+
+            # Inference
+            proba = model.predict_proba(X.values)[0]
+            classes = list(label_enc.classes_)
+            pred_idx = int(np.argmax(proba))
+            pred_class = label_enc.inverse_transform([pred_idx])[0]
+            pred_conf = float(proba[pred_idx])
+
+            # Thresholded flag (for binary setups)
+            pos_class = "PLANET" if "PLANET" in classes else classes[pred_idx]
+            pos_idx   = classes.index(pos_class)
+            is_pos    = proba[pos_idx] >= threshold
+
+            # KPIs
+            k1, k2, k3 = st.columns([2,1,1])
+            with k1:
+                st.metric("Predicted class", pred_class, help="Class with maximum probability")
+            with k2:
+                st.metric("Confidence", f"{pred_conf:.3f}")
+            with k3:
+                st.metric(f"Is {pos_class} @ {threshold:.2f}?", "YES" if is_pos else "NO")
+
+            # Probabilities table + bar
+            prob_df = pd.DataFrame({"class": classes, "probability": proba})
+            st.write("### Class probabilities")
+            st.dataframe(prob_df, use_container_width=True, hide_index=True)
+
+            fig = plt.figure(figsize=(5.8, 3.2))
+            plt.bar(classes, proba)
+            plt.ylim(0, 1); plt.ylabel("Probability"); plt.title("Class probabilities")
+            st.pyplot(fig, clear_figure=True)
+
+            with st.expander("Transformed features (MODEL)", expanded=False):
+                st.json({k: (None if pd.isna(v) else float(v)) for k, v in model_df.iloc[0].to_dict().items()})
+            with st.expander("Raw input (RAW8)", expanded=False):
+                st.json(inputs)
+
+# =============================================================================
+# TAB 2: Batch CSV
+# =============================================================================
+with tab_batch:
+    st.subheader("📦 Batch analysis (TOI/TESS/KOI CSV)")
+    st.caption("Завантаж сирий CSV з NASA Exoplanet Archive (TESS/TOI) або KOI — ми збудуємо фічі, запустимо модель і покажемо аналіз.")
+    up = st.file_uploader("Upload CSV", type=["csv", "txt"])
+
+    # logging
+    log_box = st.checkbox("Show step-by-step logs", value=False)
+    logs: list[str] = []
+
+    def log(msg: str):
+        if log_box:
+            logs.append(msg)
+
+    if up is not None and artifacts_ok:
+        try:
+            df_in = pd.read_csv(up, comment="#", engine="python")
+            st.success(f"Loaded CSV: shape={df_in.shape}")
+            st.write("Detected columns (first 40):", list(df_in.columns)[:40])
+
+            # Build features exactly matching the trained model
+            log("Building features via toi_to_koi_raw → add_model_features")
+            X, model_df = _build_features_cached(df_in, features)
+
+            log("Running inference (predict_proba)")
             P = model.predict_proba(X.values)
+            classes = list(label_enc.classes_)
             pred_idx = np.argmax(P, axis=1)
-            pred_cls = label_enc.inverse_transform(pred_idx)
+            pred = label_enc.inverse_transform(pred_idx)
             maxp = P[np.arange(len(pred_idx)), pred_idx]
 
             out = df_in.copy()
-            out["pred_class"] = pred_cls
-            out["pred_prob"]  = maxp
+            out["pred_class"] = pred
+            out["pred_prob"] = maxp
 
-            # показати кілька рядків
-            st.success(f"Predictions computed for {len(out)} rows")
-            st.dataframe(out.head(30))
+            # per-class probability columns (optional nice-to-have)
+            for i, c in enumerate(classes):
+                out[f"proba_{c.replace(' ', '_').lower()}"] = P[:, i]
 
-            # скачування
+            # thresholded decision for pos_class
+            pos_class = "PLANET" if "PLANET" in classes else classes[np.argmax(np.bincount(pred_idx))]
+            pos_idx = classes.index(pos_class)
+            out[f"is_{pos_class.lower()}_{threshold:.2f}"] = (P[:, pos_idx] >= threshold).astype(int)
+
+            st.write("### Preview of predictions")
+            st.dataframe(out.head(30), use_container_width=True)
+
             st.download_button(
                 "Download predictions CSV",
-                out.to_csv(index=False).encode("utf-8"),
-                file_name="predictions.csv",
+                data=out.to_csv(index=False).encode("utf-8"),
                 mime="text/csv",
+                file_name="predictions.csv",
+                use_container_width=True,
             )
 
-            # ----- графіки аналізу -----
-            st.subheader("Analysis visuals")
+            # ───────────────── visuals
+            st.write("## Analysis")
 
-            c1, c2 = st.columns(2)
-            with c1:
-                st.image(figure_to_bytes(hist_max_proba(maxp)))
-            with c2:
-                # частка високої впевненості по передбачених класах
-                prop = (
-                    pd.Series(pred_cls)
-                      .groupby(pred_cls)
-                      .apply(lambda idx: float(np.mean(maxp[pred_cls==idx.name] >= threshold)))
-                      .reindex(CLASSES)
-                      .fillna(0.0)
-                )
-                fig = plt.figure(figsize=(6,3.2))
-                plt.bar(prop.index, prop.values)
-                plt.ylim(0,1)
-                plt.title(f"Proportion above {threshold:.2f} by predicted class")
-                st.image(figure_to_bytes(fig))
+            # 1) Histogram of model confidence
+            st.write("**Histogram of predicted confidences (max class)**")
+            fig = plt.figure(figsize=(6,4))
+            plt.hist(out["pred_prob"].dropna().values, bins=30)
+            plt.xlabel("max class probability")
+            plt.ylabel("count")
+            plt.title("Distribution of predicted confidences")
+            st.pyplot(fig, clear_figure=True)
 
-            # якщо у файлі є істинні мітки — покажемо матрицю
-            gt_col = next((c for c in LABEL_CANDS if c in df_in.columns), None)
-            if gt_col:
-                st.subheader("Provided labels found — evaluation on this CSV")
-                y_true = normalize_labels(df_in[gt_col])
-                fig, report = confusion_if_labels(y_true, pred_cls, ordered=CLASSES)
-                st.image(figure_to_bytes(fig))
-                st.json(report)
+            # 2) P–R portrait (log-log scatter), TESS (pl_orbper/pl_rade) or KOI (koi_period/koi_prad)
+            def pr_portrait(df: pd.DataFrame, xcol: str, ycol: str, title: str):
+                x = pd.to_numeric(df[xcol], errors="coerce")
+                y = pd.to_numeric(df[ycol], errors="coerce")
+                m = np.isfinite(x) & np.isfinite(y)
+                col = np.array(out["pred_class"] == "PLANET", dtype=int)[m] if "pred_class" in out.columns else None
+                fig = plt.figure(figsize=(6,4))
+                plt.scatter(x[m], y[m], c=None if col is None else col, alpha=0.6)
+                plt.xscale("log"); plt.yscale("log")
+                plt.xlabel(xcol); plt.ylabel(ycol); plt.title(title)
+                st.pyplot(fig, clear_figure=True)
 
-            # логування
-            with st.expander("Logs"):
-                st.code("\n".join(st.session_state.get("log", [])) or "<no logs>")
+            if {"pl_orbper","pl_rade"}.issubset(out.columns):
+                st.write("**P–R portrait (TESS columns)**")
+                pr_portrait(out, "pl_orbper", "pl_rade", "P vs R_p (TESS)")
+            elif {"koi_period","koi_prad"}.issubset(out.columns):
+                st.write("**P–R portrait (KOI columns)**")
+                pr_portrait(out, "koi_period", "koi_prad", "P vs R_p (KOI)")
+
+            # 3) Correlation heatmap across available astro features
+            st.write("**Correlation heatmap**")
+            corr_cols = [c for c in [
+                "pl_orbper","pl_trandurh","pl_trandep","pl_rade","pl_insol","st_teff","st_logg","st_rad",
+                "koi_period","koi_duration","koi_depth","koi_prad","koi_steff","koi_slogg","koi_srad"
+            ] if c in out.columns]
+            if len(corr_cols) >= 3:
+                M = out[corr_cols].apply(pd.to_numeric, errors="coerce").corr()
+                fig = plt.figure(figsize=(6.5,5))
+                im = plt.imshow(M.values, interpolation="nearest")
+                plt.xticks(range(len(corr_cols)), corr_cols, rotation=45, ha="right")
+                plt.yticks(range(len(corr_cols)), corr_cols)
+                plt.title("Correlation heatmap")
+                plt.colorbar(im, fraction=0.046, pad=0.04)
+                st.pyplot(fig, clear_figure=True)
+            else:
+                st.info("Not enough numeric astro features for a heatmap (need ≥3 present columns).")
+
+            # 4) Confusion matrix + report if ground-truth exists
+            gt_col = next((c for c in LABEL_CANDS if c in out.columns), None)
+            if gt_col is not None:
+                st.write(f"**Confusion Matrix** (ground truth: `{gt_col}`)")
+                y_true = normalize_labels(out[gt_col])
+                y_pred = out["pred_class"].astype(str).str.upper().str.strip()
+                labels = sorted(list(set(y_true) | set(y_pred)))
+
+                from sklearn.metrics import confusion_matrix, classification_report
+                M = confusion_matrix(y_true, y_pred, labels=labels)
+                fig = plt.figure(figsize=(6,5))
+                plt.imshow(M, cmap="Blues")
+                plt.xticks(range(len(labels)), labels, rotation=45, ha="right")
+                plt.yticks(range(len(labels)), labels)
+                for i in range(M.shape[0]):
+                    for j in range(M.shape[1]):
+                        plt.text(j, i, str(M[i,j]), ha="center", va="center", color="black")
+                plt.title("Confusion Matrix")
+                plt.colorbar(fraction=0.046, pad=0.04)
+                st.pyplot(fig, clear_figure=True)
+
+                st.write("**Classification report (on uploaded data)**")
+                rep = classification_report(y_true, y_pred, labels=labels, output_dict=True)
+                st.json(rep)
+            else:
+                st.info("Ground truth labels not found in uploaded CSV — confusion matrix is skipped.")
+
+            # logs
+            if log_box and logs:
+                st.write("### Logs")
+                st.code("\n".join(logs))
 
         except Exception as e:
-            st.error(f"Failed: {e}")
-            with st.expander("Logs"):
-                st.code("\n".join(st.session_state.get("log", [])) or "<no logs>")
+            st.error(f"Failed to process CSV: {e}")
+    elif up is None:
+        st.info("Upload a CSV to run batch analysis.")
+    elif not artifacts_ok:
+        st.error("Artifacts not loaded — check path in the sidebar.")
+
+# ──────────────────────────────────────────────────────────────────────────────
+st.caption(f"Artifacts expected at:  **{art_dir_inp}**")
+
+
