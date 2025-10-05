@@ -200,7 +200,6 @@ with tab_single:
 with tab_batch:
     st.subheader("📦 Batch analysis (TOI/TESS/KOI CSV)")
     up = st.file_uploader("Upload CSV", type=["csv", "txt"])
-    # logging
     log_box = st.checkbox("Show step-by-step logs", value=False)
     logs: list[str] = []
 
@@ -319,6 +318,11 @@ with tab_batch:
 
             else:
                 st.info("Ground truth labels not found in uploaded CSV — confusion matrix is skipped.")
+            
+            # logs
+            if log_box and logs:
+                st.write("### Logs")
+                st.code("\n".join(logs))
 
         except Exception as e:
             st.error(f"Failed to process CSV: {e}")
