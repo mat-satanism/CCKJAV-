@@ -1,7 +1,4 @@
 # CCKJAV-
-Sure — here’s a **fully compiled, balanced, and professionally written README-style project description** in English, written from the **team’s collective voice**.
-It summarizes *what the project does, how it works, its impact, technologies used, creativity, and design choices* — ideal for a hackathon submission or presentation.
-
 ---
 
 # 🚀 **AI-Driven Exoplanet Discovery System**
