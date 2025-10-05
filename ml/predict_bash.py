@@ -36,7 +36,6 @@ def main():
     out["pred_class"] = pred_cls
     out["pred_prob"]  = maxp
 
-    # якщо є істинні мітки — нормалізуй
     gt_col = next((c for c in LABEL_CANDS if c in df_in.columns), None)
     if gt_col:
         out["label_norm"] = normalize_labels(df_in[gt_col])

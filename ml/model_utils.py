@@ -13,10 +13,6 @@ def load_artifacts(art_dir: Path):
     return model, label_enc, features, metrics
 
 def ensure_features(df_in: pd.DataFrame, features: list[str]) -> pd.DataFrame:
-    """
-    Приймає сирий DF (KOI/TOI), будує RAW8 і MODEL фічі, повертає X з потрібними колонками.
-    Важливо: NaN → 0.0 (бо є *_missing).
-    """
     raw = toi_to_koi_raw(df_in)
     model_df = add_model_features(raw)
     X = model_df.reindex(columns=features)
