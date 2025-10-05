@@ -220,7 +220,6 @@ with tab_single:
 # =============================================================================
 with tab_batch:
     st.subheader("📦 Batch analysis (TOI/TESS/KOI CSV)")
-    st.caption("Завантаж сирий CSV з NASA Exoplanet Archive (TESS/TOI) або KOI — ми збудуємо фічі, запустимо модель і покажемо аналіз.")
     up = st.file_uploader("Upload CSV", type=["csv", "txt"])
 
     # logging
